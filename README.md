@@ -1,210 +1,277 @@
 # IAM Drift Intelligence
 
-AI-powered IAM least-privilege governance platform. Continuously scans AWS IAM roles, detects permission drift, generates AI-proposed remediation policies, simulates impact, and provides a full review-and-apply workflow — all without ever writing directly to production IAM.
+Enterprise IAM least-privilege remediation platform for AWS Organizations.
+
+Detects over-permissioned roles, generates AI-assisted replacement policies, validates them using IAM Policy Simulator, and tracks permission drift over time — with human-approved, rollback-ready changes.
+
+**Reduced effective IAM permissions by 38.9% across 10 IAM roles with zero service disruption.**
+
+---
 
 ## Live Demo
 
-| Item | Value |
-|------|-------|
-| Frontend | https://d24vg0bs5gjmhb.cloudfront.net |
-| API | https://p6oiquka77.execute-api.us-east-1.amazonaws.com/prod |
-| AWS Account | TechCorp demo — `111122223333` |
-| Default scan | `2026-03-17-account-111122223333-scan-001` |
-| Seed roles | 10 IAM roles (4 HIGH, 4 MEDIUM, 2 LOW risk) |
+| | |
+|---|---|
+| **Frontend** | https://d24vg0bs5gjmhb.cloudfront.net |
+| **API** | https://p6oiquka77.execute-api.us-east-1.amazonaws.com/prod/api/dashboard/metrics |
 
-## What It Does
+Loads with TechCorp demo environment — 10 pre-assessed IAM roles. Account IAM Health Score: 54/100.
 
-| Page | Description |
-|------|-------------|
-| **Dashboard** | Account health score (0–100), 30-day trend chart, wildcard action before/after, risk distribution bar chart, trigger manual scan |
-| **Remediation Queue** | Review all PENDING findings; approve (requires simulation COMPLETE) or reject with notes; optimistic UI removes row immediately |
-| **Role Detail** | React Flow blast radius graph, AI intent/gap analysis, simulation results (preserved / removed / breaking), side-by-side policy diff, Terraform export |
-| **Drift Timeline** | Per-role risk score and permission count over time across multiple scans |
-| **Policy Versions** | Full policy history with version diffs; rollback to previous version for applied findings |
-| **Executive Report** | AI-generated markdown report for leadership; generate on demand or per scan |
+Demo environment uses a seeded multi-account dataset representing enterprise IAM conditions and remediation workflows.
+
+---
+
+## The Problem
+
+IAM is the most misconfigured layer in AWS — and the hardest to fix safely.
+
+Most teams:
+- Know roles are over-permissioned
+- Lack usage visibility to safely reduce access
+- Avoid making changes due to risk of breaking production
+
+Existing tools stop at detection: flag wildcards, generate reports, leave remediation to engineers. That gap creates long-lived security risk.
+
+---
+
+## The Solution
+
+IAM Drift Intelligence closes the remediation gap by combining:
+- Deterministic IAM policy analysis
+- CloudTrail usage evidence
+- AI-assisted least-privilege policy generation
+- IAM Policy Simulator validation
+- Human-approved, rollback-ready changes
+
+**Detection is table stakes. This is the remediation layer.**
+
+---
+
+## Business Impact
+
+- Reduces excessive permissions before they become privilege-escalation paths
+- Eliminates manual IAM cleanup and guesswork
+- Provides simulation-validated remediation before changes are applied
+- Enables auditable, reversible IAM changes
+- Tracks permission drift across multi-account AWS environments
+
+---
+
+## Why It's Different
+
+| Most IAM Tools | IAM Drift Intelligence |
+|---|---|
+| Detect risky permissions | Detects excessive access deterministically |
+| Generate static reports | Uses real CloudTrail usage data to scope changes |
+| Stop before remediation | Generates AI policy replacements (non-authoritative) |
+| No validation | Validates all changes via IAM Policy Simulator |
+| No rollback | Ships human-approved, rollback-ready remediation packages |
+| Single account | Tracks drift continuously across an AWS Organization |
+
+---
+
+## Core Workflows
+
+| Workflow | What It Enables |
+|---|---|
+| Security Posture Dashboard | IAM Health Score, wildcard exposure, remediation progress, risk distribution |
+| Remediation Queue | Findings move through enrichment → AI → simulation → approval |
+| Role Detail | Intent gap, blast radius, policy diff, Terraform-ready output |
+| Drift Timeline | Permission changes and risk score evolution over time |
+| Policy Versions | Rollback-ready version history and comparison |
+| Executive Report | AI-generated leadership summary of IAM posture and risk |
+
+---
+
+## Trust & Safety Controls
+
+- AI never makes enforcement decisions
+- Detection logic is fully deterministic
+- IAM Policy Simulator validation is required before approval
+- All remediation actions are human-approved
+- Rollback-ready policy versions are preserved
+- Frontend is read-only and never calls AWS APIs directly
+
+---
+
+## Screenshots
+
+### Security Posture Dashboard
+![Dashboard](docs/screenshots/dashboard.png)
+*IAM Health Score, wildcard reduction, remediation progress, and risk distribution.*
+
+### Remediation Queue
+![Queue](docs/screenshots/queue.png)
+*Findings progress through enrichment stages — approval enabled only after simulation validation.*
+
+### Role Detail — Intent Gap + Blast Radius
+![Role Detail](docs/screenshots/role-detail.png)
+*Compares intended vs actual permissions, abuse scenarios, simulation results, and policy diff.*
+
+---
 
 ## Architecture
-
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  CloudFront + S3  │  React 18 SPA (6 pages)                 │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ HTTPS
-┌──────────────────────────────▼──────────────────────────────┐
-│  API Gateway HTTP API v2  │  Single Lambda (apiHandler)      │
-│  14 routes: scans / findings / dashboard / reports           │
-└──────────┬────────────────────────┬────────────────────────┘
-           │                        │
-┌──────────▼──────────┐  ┌─────────▼──────────────────────────┐
-│  DynamoDB (3 tables) │  │  EventBridge → SQS → Lambdas       │
-│  findings            │  │  scannerLambda  → enrichmentLambda  │
-│  scans               │  │  (5-stage pipeline)                 │
-│  accounts            │  │  Stage 1: CloudTrail lookup         │
-└──────────────────────┘  │  Stage 2: AI enrichment (Claude)    │
-                          │  Stage 3: IAM Policy Simulator      │
-                          │  Stage 4: Blast radius assembly      │
-                          │  Stage 5: Health score update        │
-                          └─────────────────────────────────────┘
-                                         │
-                               ┌─────────▼──────────┐
-                               │  SNS → Email alert  │
-                               │  (risk_score ≥ 13)  │
-                               └────────────────────┘
+EventBridge (daily)
+  → Coordinator Lambda
+    → SQS (per account)
+      → Scanner Lambda (parallel)
+        → DynamoDB (snapshots + findings)
+        → SQS enrichment queue (per role)
+
+          Stage 1: Normalize + deterministic analysis
+          Stage 2: CloudTrail usage evidence
+          Stage 3: AI policy candidate generation
+          Stage 4: Policy Simulator validation
+          Stage 5: Final assembly + metrics
+
+            → DynamoDB (remediation package)
+            → SNS (high-risk alerts)
 ```
 
-## Tech Stack
+**Design principles:**
+- Frontend renders precomputed state only — no live AWS calls
+- Each enrichment stage fails independently and gracefully
+- AI enriches — never determines risk
+- Simulation is concurrency-controlled and mandatory for approval
 
-**Frontend**
-- React 18.3 + TypeScript + Vite
-- Tailwind CSS (utility-first)
-- Recharts (health score + risk distribution charts)
-- React Flow 11 (blast radius graph)
-- Axios + React Router v6
-
-**Backend**
-- Node.js 20 + TypeScript
-- AWS Lambda (arm64) — 4 functions
-- API Gateway HTTP API v2
-- DynamoDB (PAY_PER_REQUEST + PITR)
-- SQS (scan queue + enrichment queue)
-- SNS (HIGH risk email alerts)
-- EventBridge (scheduled scans)
-- AWS SAM + CloudFormation
+---
 
 ## AI Layer
 
-The enrichment pipeline calls Claude via a model-agnostic `AIProvider` interface:
+AI is used for enrichment, not decision-making.
 
-```typescript
-interface AIProvider {
-  generateRemediationBundle(input: RemediationInput): Promise<RemediationBundle>;
-  generateExecutiveSummary(input: ExecutiveSummaryInput): Promise<string>;
-}
-```
+**Responsibilities:**
+1. Generate least-privilege policy candidates
+2. Infer intended role behavior vs actual permissions (Intent Gap)
+3. Assign confidence scores
+4. Generate abuse scenarios
+5. Produce executive summaries
 
-`generateRemediationBundle()` returns:
-- `intent_summary` — what this role is meant to do
-- `actual_permissions_summary` — what it can actually do
-- `intent_gap` — the difference (what it has that it shouldn't)
-- `abuse_scenario` — how an attacker could exploit it
-- `proposed_policy` — least-privilege PolicyDocument
-- `ai_confidence_score` + `ai_confidence_note`
+**Architecture:**
+- Model-agnostic `AIProvider` interface — same pattern across this portfolio
+- Current provider: Anthropic `claude-sonnet-4-20250514`
+- Swap path: implement `BedrockProvider`, set `AI_PROVIDER=bedrock` — no handler or frontend changes required
 
-Switch providers via `AI_PROVIDER=bedrock` (implement `BedrockProvider` against the same interface).
+**Key principle:** AI augments analysis — it does not replace deterministic security logic.
+
+---
 
 ## Risk Scoring Model
 
-Each finding receives a deterministic `risk_score` (0–22) before AI runs:
+| Factor | Weight |
+|---|---|
+| Wildcard action (`*`, `ec2:*`, etc.) | +5 each |
+| `Resource: *` in Allow statement | +3 flat |
+| Unused service (>90 days / never used) | +4 each |
+| Customer-managed role | +2 flat |
 
-| Signal | Max Points |
-|--------|-----------|
-| Wildcard actions (`*`) | 8 |
-| Wildcard resources (`*`) | 6 |
-| Unused services (>90 days) | 4 |
-| High-blast-radius services (iam, s3, ec2, rds, lambda, sts, kms) | 4 |
+**Risk levels:** LOW <6 · MEDIUM 6–12 · HIGH 13–21 · CRITICAL 22+
 
-`risk_level` thresholds: CRITICAL ≥ 18 · HIGH ≥ 13 · MEDIUM ≥ 6 · LOW < 6
+---
 
-SNS alert fires on first enrichment when `risk_score >= 13` (`alert_sent` flag prevents duplicates).
-
-## Key Metrics (TechCorp Demo)
+## Key Metrics — Demo Environment
 
 | Metric | Value |
-|--------|-------|
-| Account health score | 54 / 100 |
-| Total roles scanned | 10 |
-| Wildcard actions (before) | 12 |
-| Wildcard actions (after approved) | 9 |
+|---|---|
+| Roles scanned | 10 |
+| IAM Health Score | 54 / 100 |
+| Wildcards before → after | 12 → 9 |
 | Avg permission reduction | 38.9% |
-| Findings APPROVED | 3 (2 applied) |
-| Findings REJECTED | 1 |
-| Findings PENDING | 6 |
+| Pending review | 6 |
+| High / Critical roles | 4 |
 
-## Portfolio
+---
 
-IAM Drift Intelligence is the fourth project in a cloud operations portfolio:
+## Enrichment Pipeline — Failure Handling
 
-1. **MigrationOps** — AI-assisted migration planning platform (React + Express + Claude)
-2. **SentinelOps** — AI incident triage and runbook automation (React + 4-Lambda AWS backend)
-3. **DeployIQ** — Intelligent deployment pipeline with risk scoring
-4. **IAM Drift Intelligence** — Continuous IAM governance with AI remediation ← *this project*
+| Stage | Output | On Failure |
+|---|---|---|
+| 1 | Deterministic findings | Pipeline stops |
+| 2 | CloudTrail usage evidence | Continues with empty evidence |
+| 3 | AI policy candidate | Marks `ai_status: FAILED`, skips Stage 4 |
+| 4 | Simulation results | Marks `simulation_status: FAILED`, Stage 5 continues |
+| 5 | Final assembly + publish | Partial publish, non-fatal |
 
-Each project demonstrates a different AWS architecture pattern while sharing a consistent frontend stack (React 18 + TypeScript + Tailwind + Vite).
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, TypeScript, Vite, Tailwind CSS, Recharts, React Flow |
+| Backend | Node.js 20, TypeScript, Lambda (arm64), API Gateway HTTP API v2 |
+| Database | DynamoDB — 3 tables, PAY_PER_REQUEST, point-in-time recovery |
+| Messaging | SQS (account + role fan-out), SNS (high-risk alerts) |
+| Scheduler | EventBridge (daily scan trigger) |
+| AI | Anthropic Claude via model-agnostic AIProvider interface (Bedrock-ready) |
+| Infrastructure | AWS SAM / CloudFormation, CloudFront + S3 (OAC), SSM Parameter Store |
+| Multi-account | AWS Organizations + STS AssumeRole |
+
+---
 
 ## Local Development
 
-**Fast mode (in-memory storage, no AWS required)**
+**Path A — No AWS required**
 ```bash
-# Terminal 1 — backend
-cd backend
-cp .env.example .env          # add ANTHROPIC_API_KEY
-npm install
-npm run dev                   # http://localhost:3001
+cd backend && cp .env.example .env   # add ANTHROPIC_API_KEY
+npm install && npm run dev            # → http://localhost:3001
 
-# Terminal 2 — frontend
-cd frontend
-npm install
-npm run dev                   # http://localhost:5173
+cd frontend && npm install && npm run dev   # → http://localhost:5173
 ```
 
-**With DynamoDB Local**
+**Path B — DynamoDB Local**
 ```bash
-# Start DynamoDB Local
 docker run -d -p 8000:8000 amazon/dynamodb-local
-
-# Create tables
 ./infrastructure/scripts/setup-local-dynamo.sh
-
-# Seed data (first time only)
-cd backend && npm run seed:dynamo
-
-# Start backend pointing at local DynamoDB
-STORAGE_BACKEND=dynamodb DYNAMODB_ENDPOINT=http://localhost:8000 npm run dev
+cd backend   # set STORAGE_BACKEND=dynamodb, DYNAMODB_ENDPOINT=http://localhost:8000
+npm run seed:dynamo && npm run dev
 ```
 
-**With AWS DynamoDB**
+**Path C — SAM Local**
 ```bash
-# Set env vars
-export AWS_REGION=us-east-1
-export STORAGE_BACKEND=dynamodb
-
-cd backend
-npm run seed:dynamo           # seeds iam-drift-findings, iam-drift-scans, iam-drift-accounts
-npm run dev
+sam build && sam local start-api
+cd frontend && npm run dev
 ```
+
+---
 
 ## Deployment
-
-**Store the API key in SSM**
 ```bash
+# Store API key
 aws ssm put-parameter \
   --name /iam-drift-intelligence/anthropic-api-key \
   --value "sk-ant-..." \
-  --type SecureString \
+  --type String \
   --region us-east-1
-```
 
-**Build and deploy backend (SAM)**
-```bash
-sam build
-sam deploy --guided
-# Follow prompts — saves config to samconfig.toml for subsequent deploys
-sam deploy          # subsequent deploys (no --guided needed)
-```
+# Deploy backend
+sam build && sam deploy --no-confirm-changeset
 
-**Deploy frontend to S3 + CloudFront**
-```bash
-cd frontend
-npm run build
-
-./infrastructure/scripts/deploy-frontend.sh \
-  --bucket YOUR_S3_BUCKET \
-  --distribution YOUR_CLOUDFRONT_ID \
-  --api-url https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com
-```
-
-**Seed production DynamoDB**
-```bash
+# Seed DynamoDB
 cd backend
-AWS_REGION=us-east-1 STORAGE_BACKEND=dynamodb npm run seed:dynamo
+AWS_REGION=us-east-1 STORAGE_BACKEND=dynamodb \
+  DYNAMODB_TABLE_FINDINGS=iam-drift-findings-prod \
+  DYNAMODB_TABLE_SCANS=iam-drift-scans-prod \
+  DYNAMODB_TABLE_ACCOUNTS=iam-drift-accounts-prod \
+  npm run seed:dynamo
+
+# Deploy frontend
+./infrastructure/scripts/deploy-frontend.sh \
+  --bucket YOUR-BUCKET \
+  --distribution YOUR-DISTRIBUTION-ID \
+  --api-url YOUR-API-GATEWAY-URL
 ```
+
+---
+
+## Portfolio
+
+Part of a unified cloud operations platform:
+
+| Project | Pillar | Status |
+|---|---|---|
+| [MigrationOps](https://d2tzxxbh5vpj3z.cloudfront.net) | Migration planning | Live |
+| [SentinelOps](https://d3lxgw07er3hso.cloudfront.net) | Incident response | Live |
+| DeployIQ | Cost governance | Live |
+| **IAM Drift Intelligence** | **Security posture** | **Live** |
