@@ -1,0 +1,429 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  IAM Drift Intelligence — Continuous IAM least-privilege governance platform
+  with AI-generated remediation, policy simulation, and drift intelligence.
+
+  Backend: API Gateway (HTTP API) + Lambda + DynamoDB + EventBridge + SQS + SNS
+  Frontend: S3 + CloudFront (deployed separately via deploy-frontend.sh)
+
+# ─── Parameters ───────────────────────────────────────────────────────────────
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+
+  AnthropicApiKeyParam:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /iam-drift-intelligence/anthropic-api-key
+    Description: >
+      Anthropic API key stored in SSM Parameter Store.
+      Create before deploying:
+        aws ssm put-parameter \
+          --name /iam-drift-intelligence/anthropic-api-key \
+          --value "sk-ant-..." \
+          --type String
+
+  FrontendOrigin:
+    Type: String
+    Default: '*'
+    Description: CloudFront domain for CORS (e.g. https://d1234.cloudfront.net)
+
+  AlertEmail:
+    Type: String
+    Default: ''
+    Description: Email address for HIGH-risk IAM finding alerts via SNS
+
+# ─── Globals ──────────────────────────────────────────────────────────────────
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 60
+    MemorySize: 512
+    Architectures: [arm64]
+    Environment:
+      Variables:
+        NODE_ENV: production
+        STORAGE_BACKEND: dynamodb
+        AI_PROVIDER: anthropic
+        ANTHROPIC_API_KEY: !Ref AnthropicApiKeyParam
+        ANTHROPIC_MODEL: claude-sonnet-4-20250514
+        DYNAMODB_TABLE_FINDINGS: !Ref FindingsTable
+        DYNAMODB_TABLE_SCANS: !Ref ScansTable
+        DYNAMODB_TABLE_ACCOUNTS: !Ref AccountsTable
+        CORS_ORIGIN: !Ref FrontendOrigin
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+    Tracing: Active
+
+# ─── Resources ────────────────────────────────────────────────────────────────
+
+Resources:
+
+  # ── API Gateway ─────────────────────────────────────────────────────────────
+
+  IamDriftApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Environment
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref FrontendOrigin
+        AllowMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+        AllowHeaders: [Content-Type, Authorization]
+        MaxAge: 300
+
+  # ── Lambda Functions ─────────────────────────────────────────────────────────
+
+  ApiHandler:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'iam-drift-intelligence-api-${Environment}'
+      CodeUri: backend/
+      Handler: dist/handlers/apiHandler.handler
+      Description: REST API handler — findings, scans, dashboard, reports
+      Timeout: 60
+      Events:
+        ApiProxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref IamDriftApi
+            Path: /api/{proxy+}
+            Method: ANY
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FindingsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScansTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AccountsTable
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: false
+        EntryPoints: [src/handlers/apiHandler.ts]
+
+  ScanCoordinator:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'iam-drift-intelligence-coordinator-${Environment}'
+      CodeUri: backend/
+      Handler: dist/handlers/scanCoordinator.handler
+      Description: EventBridge-triggered scan coordinator — fans out to SQS per account
+      Timeout: 60
+      Environment:
+        Variables:
+          SCAN_QUEUE_URL: !Ref ScanQueue
+          SNS_ALERT_TOPIC_ARN: !Ref AlertTopic
+      Events:
+        DailyScan:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 day)
+            Name: iam-drift-daily-scan
+            Description: Daily IAM posture scan
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScansTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AccountsTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt ScanQueue.QueueName
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        EntryPoints: [src/handlers/scanCoordinator.ts]
+
+  ScannerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'iam-drift-intelligence-scanner-${Environment}'
+      CodeUri: backend/
+      Handler: dist/handlers/scannerHandler.handler
+      Description: Per-account IAM scanner — enumerates roles and writes raw snapshots
+      Timeout: 300
+      Environment:
+        Variables:
+          ENRICHMENT_QUEUE_URL: !Ref EnrichmentQueue
+      Events:
+        ScanQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ScanQueue.Arn
+            BatchSize: 1
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FindingsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScansTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt EnrichmentQueue.QueueName
+        - Statement:
+            - Effect: Allow
+              Action: [iam:ListRoles, iam:GetRole, iam:GetRolePolicy, iam:ListRolePolicies, iam:ListAttachedRolePolicies, iam:GetPolicy, iam:GetPolicyVersion]
+              Resource: '*'
+            - Effect: Allow
+              Action: [sts:AssumeRole]
+              Resource: 'arn:aws:iam::*:role/IamDriftScannerRole'
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        EntryPoints: [src/handlers/scannerHandler.ts]
+
+  EnrichmentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'iam-drift-intelligence-enrichment-${Environment}'
+      CodeUri: backend/
+      Handler: dist/handlers/enrichmentHandler.handler
+      Description: 5-stage enrichment pipeline — normalize, CloudTrail, AI, simulate, assemble
+      Timeout: 120
+      Environment:
+        Variables:
+          SNS_ALERT_TOPIC_ARN: !Ref AlertTopic
+      Events:
+        EnrichmentQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt EnrichmentQueue.Arn
+            BatchSize: 1
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FindingsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScansTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AccountsTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt AlertTopic.TopicName
+        - Statement:
+            - Effect: Allow
+              Action: [cloudtrail:LookupEvents]
+              Resource: '*'
+            - Effect: Allow
+              Action: [iam:SimulatePrincipalPolicy]
+              Resource: '*'
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        EntryPoints: [src/handlers/enrichmentHandler.ts]
+
+  # ── DynamoDB Tables ──────────────────────────────────────────────────────────
+
+  FindingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'iam-drift-findings-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: scan_id
+          AttributeType: S
+        - AttributeName: role_id
+          AttributeType: S
+        - AttributeName: review_decision
+          AttributeType: S
+        - AttributeName: risk_level
+          AttributeType: S
+        - AttributeName: account_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: scan_id
+          KeyType: HASH
+        - AttributeName: role_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: review_decision-index
+          KeySchema:
+            - AttributeName: review_decision
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: risk_level-index
+          KeySchema:
+            - AttributeName: risk_level
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: account_id-index
+          KeySchema:
+            - AttributeName: account_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  ScansTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'iam-drift-scans-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: scan_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: scan_id
+          KeyType: HASH
+
+  AccountsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'iam-drift-accounts-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: account_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: account_id
+          KeyType: HASH
+
+  # ── SQS Queues ───────────────────────────────────────────────────────────────
+
+  ScanQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'iam-drift-scan-queue-${Environment}'
+      VisibilityTimeout: 360
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ScanDLQ.Arn
+        maxReceiveCount: 3
+
+  ScanDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'iam-drift-scan-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 days
+
+  EnrichmentQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'iam-drift-enrichment-queue-${Environment}'
+      VisibilityTimeout: 150
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt EnrichmentDLQ.Arn
+        maxReceiveCount: 3
+
+  EnrichmentDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'iam-drift-enrichment-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600
+
+  # ── SNS Alert Topic ──────────────────────────────────────────────────────────
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'iam-drift-alerts-${Environment}'
+      DisplayName: IAM Drift Intelligence Alerts
+
+  # ── S3 + CloudFront (Frontend) ───────────────────────────────────────────────
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'iam-drift-intelligence-frontend-${Environment}-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub 'iam-drift-oac-${Environment}'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt CloudFrontOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized
+          AllowedMethods: [GET, HEAD]
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        PriceClass: PriceClass_100
+
+# ─── Outputs ──────────────────────────────────────────────────────────────────
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway URL
+    Value: !Sub 'https://${IamDriftApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+
+  CloudFrontUrl:
+    Description: CloudFront distribution URL
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'
+
+  FrontendBucketName:
+    Description: S3 bucket name for frontend deployment
+    Value: !Ref FrontendBucket
+
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID (needed for cache invalidation)
+    Value: !Ref CloudFrontDistribution
+
+  FindingsTableName:
+    Description: DynamoDB findings table name
+    Value: !Ref FindingsTable
+
+  ScansTableName:
+    Description: DynamoDB scans table name
+    Value: !Ref ScansTable
+
+  AccountsTableName:
+    Description: DynamoDB accounts table name
+    Value: !Ref AccountsTable
+
+  AlertTopicArn:
+    Description: SNS topic ARN for HIGH-risk alerts
+    Value: !Ref AlertTopic

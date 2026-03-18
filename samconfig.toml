@@ -1,0 +1,36 @@
+# IAM Drift Intelligence — SAM Deployment Configuration
+
+version = 0.1
+
+[default]
+[default.global.parameters]
+stack_name = "iam-drift-intelligence"
+region = "us-east-1"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+parameter_overrides = [
+  "Environment=prod",
+  "FrontendOrigin=*"
+  # AnthropicApiKeyParam defaults to SSM /iam-drift-intelligence/anthropic-api-key
+  # AlertEmail — set to receive HIGH-risk finding notifications
+]
+
+[default.local_start_api.parameters]
+port = 3002
+env_vars = "env.local.json"
+warm_containers = "EAGER"
+
+[staging]
+[staging.deploy.parameters]
+stack_name = "iam-drift-intelligence-staging"
+parameter_overrides = [
+  "Environment=staging",
+  "FrontendOrigin=*"
+]

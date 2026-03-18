@@ -1,0 +1,32 @@
+# ─── Dependencies ─────────────────────────────────────────────────────────────
+node_modules/
+
+# ─── Environment / Secrets ────────────────────────────────────────────────────
+.env
+.env.local
+.env.production
+env.local.json
+
+# ─── Build Output ─────────────────────────────────────────────────────────────
+dist/
+build/
+.aws-sam/
+
+# ─── TypeScript Compiled Output ───────────────────────────────────────────────
+backend/src/**/*.js
+backend/src/**/*.js.map
+
+# ─── AWS / SAM ────────────────────────────────────────────────────────────────
+# samconfig.toml is safe to commit (no account IDs or secrets)
+# Uncomment below to exclude it:
+# samconfig.toml
+
+# ─── OS / Editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*

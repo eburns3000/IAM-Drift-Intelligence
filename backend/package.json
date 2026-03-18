@@ -1,0 +1,37 @@
+{
+  "name": "iam-drift-intelligence-backend",
+  "version": "1.0.0",
+  "description": "IAM Drift Intelligence backend — AWS Lambda + DynamoDB least-privilege governance platform",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "build": "tsc",
+    "build:check": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "seed:dynamo": "ts-node-dev --transpile-only src/scripts/seedDynamo.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.27.0",
+    "@aws-sdk/client-cloudtrail": "^3.1011.0",
+    "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/client-iam": "^3.1011.0",
+    "@aws-sdk/client-sns": "^3.1011.0",
+    "@aws-sdk/client-sqs": "^3.1011.0",
+    "@aws-sdk/client-sts": "^3.1011.0",
+    "@aws-sdk/lib-dynamodb": "^3.600.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.143",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.10",
+    "@types/uuid": "^10.0.0",
+    "esbuild": "^0.21.5",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.3"
+  }
+}
